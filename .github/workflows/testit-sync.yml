@@ -90,11 +90,13 @@ jobs:
 
             // Извлекаем URL скриншотов из body
             const imageUrls = [];
-            const imageRegex = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
+            const htmlRegex = /<img[^>]+src=["'](https?:\/\/[^"']+)["']/gi;
             let match;
-            while ((match = imageRegex.exec(body)) !== null) {
+            while ((match = htmlRegex.exec(body)) !== null) {
               imageUrls.push(match[1]);
             }
+
+            core.info(`Found ${imageUrls.length} screenshot(s): ${JSON.stringify(imageUrls)}`);
 
             const payload = {
               entityTypeName: 'TestCases',
