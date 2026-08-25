@@ -18,74 +18,81 @@ jobs:
        with:
          github-token: ${{ secrets.GITHUB_TOKEN }}
          script: |
-           const issue = context.payload.issue;
-           const labels = (issue.labels || []).map(l => l.name.toLowerCase());
-           if (!labels.includes('bug')) {
-             core.info('Нет label bug — пропускаю.');
-             return;
-           }
-
-           const body = issue.body || '';
-           const lines = body.split('\n').map(s => s.trim()).filter(Boolean);
-
-           // Простой парсинг шагов из блока "To Reproduce"
-           let inRepro = false;
-           const reproSteps = [];
-           for (const line of lines) {
-             const low = line.toLowerCase();
-             if (low.includes('to reproduce')) { inRepro = true; continue; }
-             if (inRepro && (low.includes('expected behavior') || low.includes('screenshots') || low.includes('desktop') || low.includes('additional context'))) {
-               inRepro = false;
-             }
-             if (inRepro && /^\d+\./.test(line)) reproSteps.push(line.replace(/^\d+\.\s*/, '));
-           }
-
-           const steps = reproSteps.length
-             ? reproSteps.map(s => ({ action: s, expected: 'Шаг выполнен без ошибок' }))
-             : [{ action: 'Открыть issue и выполнить проверку по описанию', expected: 'Баг воспроизводится' }];
-
-           const payload = {
-             entityTypeName: "TestCases",
-             name: issue.title,
-             projectId: process.env.TESTIT_PROJECT_ID,
-             sectionId: process.env.TESTIT_SECTION_ID,
-             state: "Ready",
-             priority: "Medium",
-             duration: 60,
-             precondition: "Issue создан в GitHub и помечен label bug.",
-             postcondition: "Проверка завершена.",
-             description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
-             steps
-           };
-
-           const resp = await fetch(`${process.env.TESTIT_URL}/api/v2/workItems`, {
-             method: 'POST',
-             headers: {
-               'accept': 'application/json',
-               'content-type': 'application/json',
-               'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
-             },
-             body: JSON.stringify(payload)
-           });
-
-           const text = await resp.text();
-           core.info(`TestIT status: ${resp.status}`);
-           core.info(`TestIT response: ${text}`);
-
-           if (!resp.ok) {
-             core.setFailed(`TestIT API error ${resp.status}: ${text}`);
-             return;
-           }
-
-           let id = '';
-           try { id = JSON.parse(text).id || ''; } catch {}
-           const msg = id
-             ? `✅ Тест-кейс создан в TestIT: \`${id}\`
-             : `✅ Тест-кейс создан в TestIT.`;
-
-           await github.rest.issues.createComment({
-             owner: context.repo.owner,
-             repo: context.repo,
-             issue_number: issue.number,
-             body: msg
-           });
+          const issue = context.payload.issue;
+          const labels = (issue.labels || []).map(l => l.name.toLowerCase());
+          if (!labels.includes('bug')) {
+            core.info('Нет label bug — пропускаю.');
+            return;
+          }
+         
+          const body = issue.body || '';
+          const lines = body.split('\n').map(s => s.trim()).filter(Boolean);
+         
+          let inRepro = false;
+          const reproSteps = [];
+          for (const line of lines) {
+            const low = line.toLowerCase();
+            if (low.includes('to reproduce')) { inRepro = true; continue; }
+            if (inRepro && (
+              low.includes('expected behavior') ||
+              low.includes('screenshots') ||
+              low.includes('desktop') ||
+              low.includes('additional context')
+            )) {
+              inRepro = false;
+            }
+            if (inRepro && /^\d+\./.test(line)) {
+              reproSteps.push(line.replace(/^\d+\.\s*/, '));
+            }
+          }
+         
+          const steps = reproSteps.length
+            ? reproSteps.map(s => ({ action: s, expected: 'Шаг выполнен без ошибок' }))
+            : [{ action: 'Открыть issue и выполнить проверку по описанию', expected: 'Баг воспроизводится' }];
+         
+          const payload = {
+            entityTypeName: 'TestCases',
+            name: issue.title,
+            projectId: process.env.TESTIT_PROJECT_ID,
+            sectionId: process.env.TESTIT_SECTION_ID,
+            state: 'Ready',
+            priority: 'Medium',
+            duration: 60,
+            precondition: 'Issue создан в GitHub и помечен label bug.',
+            postcondition: 'Проверка завершена.',
+            description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
+            steps
+          };
+         
+          const resp = await fetch(`${process.env.TESTIT_URL}/api/v2/workItems`, {
+            method: 'POST',
+            headers: {
+              'accept': 'application/json',
+              'content-type': 'application/json',
+              'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
+            },
+            body: JSON.stringify(payload)
+          });
+         
+          const text = await resp.text();
+          core.info(`TestIT status: ${resp.status}`);
+          core.info(`TestIT response: ${text}`);
+         
+          if (!resp.ok) {
+            core.setFailed(`TestIT API error ${resp.status}: ${text}`);
+            return;
+          }
+         
+          let id = '';
+          try { id = JSON.parse(text).id || ''; } catch {}
+         
+          const msg = id
+            ? `✅ Тест-кейс создан в TestIT: \`${id}\`
+            : '✅ Тест-кейс создан в TestIT.';
+         
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo,
+            issue_number: issue.number,
+            body: msg
+          });
