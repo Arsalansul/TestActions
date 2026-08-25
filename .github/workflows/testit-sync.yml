@@ -73,7 +73,7 @@ jobs:
               if (!cleaned) continue;
               steps.push({
                 action: cleaned,
-                expected: 'Шаг выполнен без ошибок'
+                expected: ''
               });
             }
 
@@ -141,28 +141,47 @@ jobs:
 
             // Загружаем скриншоты как вложения
             if (createdId && imageUrls.length > 0) {
+              const boundary = '----FormBoundary' + Date.now().toString(16);
+
               for (const imgUrl of imageUrls) {
                 try {
+                  core.info(`Downloading screenshot: ${imgUrl}`);
                   const imgResp = await fetch(imgUrl);
-                  const blob = await imgResp.blob();
-                  const fileName = imgUrl.split('/').pop() || 'screenshot.png';
 
-                  const formData = new FormData();
-                  formData.append('file', blob, fileName);
+                  if (!imgResp.ok) {
+                    core.warning(`Failed to download screenshot ${imgUrl}: ${imgResp.status}`);
+                    continue;
+                  }
+
+                  const arrayBuffer = await imgResp.arrayBuffer();
+                  const fileName = imgUrl.split('/').pop() || 'screenshot.png';
+                  const contentType = imgResp.headers.get('content-type') || 'image/png';
+
+                  // Собираем multipart body вручную
+                  const partHeader = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${contentType}\r\n\r\n`;
+                  const partFooter = `\r\n--${boundary}--\r\n`;
+
+                  const headerBytes = Buffer.from(partHeader);
+                  const footerBytes = Buffer.from(partFooter);
+                  const bodyBytes = Buffer.from(arrayBuffer);
+
+                  const multipartBody = Buffer.concat([headerBytes, bodyBytes, footerBytes]);
 
                   const attachUrl = `${process.env.TESTIT_URL}/api/v2/workItems/${createdId}/attachments`;
                   const attachResp = await fetch(attachUrl, {
                     method: 'POST',
                     headers: {
-                      'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
+                      'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`,
+                      'content-type': `multipart/form-data; boundary=${boundary}`
                     },
-                    body: formData
+                    body: multipartBody
                   });
 
+                  const attachText = await attachResp.text();
                   if (attachResp.ok) {
                     core.info(`Screenshot uploaded: ${imgUrl}`);
                   } else {
-                    core.warning(`Failed to upload screenshot ${imgUrl}: ${await attachResp.text()}`);
+                    core.warning(`Failed to upload screenshot ${imgUrl}: ${attachResp.status} ${attachText}`);
                   }
                 } catch (e) {
                   core.warning(`Error uploading screenshot ${imgUrl}: ${e.message}`);
