@@ -25,8 +25,8 @@ jobs:
            const issue = context.payload.issue;
            const labels = (issue.labels || []).map(l => String(l.name || '').toLowerCase());
 
-           if (!labels.includes('bug')) {
-             core.info('No "bug" label, skip.');
+           if (!labels.includes('testit')) {
+             core.info('No "testit" label, skip.');
              return;
            }
 
