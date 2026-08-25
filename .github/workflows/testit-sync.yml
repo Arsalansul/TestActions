@@ -1,90 +1,91 @@
 name: Sync GitHub Issues to TestIT
 
 on:
-  issues:
-    types: [opened]
+ issues:
+   types: [opened]
 
 jobs:
-  sync-to-testit:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Create test case in TestIT
-        env:
-          TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
-          TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }}
-          TESTIT_TEST_SUITE_ID: ${{ secrets.TESTIT_TEST_SUITE_ID }}
-        run: |
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          ISSUE_BODY="${{ github.event.issue.body }}"
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
+ create-testit-testcase:
+   runs-on: ubuntu-latest
+   steps:
+     - name: Create Test Case in TestIT
+       uses: actions/github-script@v7
+       env:
+         TESTIT_URL: ${{ secrets.TESTIT_URL }} # https://team-cyqh.testit.software
+         TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
+         TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }} # GUID, как в рабочем curl
+         TESTIT_SECTION_ID: ${{ secrets.TESTIT_SECTION_ID }} # sectionId
+       with:
+         github-token: ${{ secrets.GITHUB_TOKEN }}
+         script: |
+           const issue = context.payload.issue;
+           const labels = (issue.labels || []).map(l => l.name.toLowerCase());
+           if (!labels.includes('bug')) {
+             core.info('Нет label bug — пропускаю.');
+             return;
+           }
 
-          # Парсим через grep/sed
-          NAME=$(echo "$ISSUE_BODY" | awk '/\*\*Describe the bug\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}' | head -c 200)
-          STEPS=$(echo "$ISSUE_BODY" | awk '/\*\*To Reproduce\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}')
-          EXPECTED=$(echo "$ISSUE_BODY" | awk '/\*\*Expected behavior\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}')
+           const body = issue.body || '';
+           const lines = body.split('\n').map(s => s.trim()).filter(Boolean);
 
-          if [ -z "$NAME" ]; then
-            NAME="$ISSUE_TITLE"
-            STEPS=""
-            EXPECTED=""
-          fi
+           // Простой парсинг шагов из блока "To Reproduce"
+           let inRepro = false;
+           const reproSteps = [];
+           for (const line of lines) {
+             const low = line.toLowerCase();
+             if (low.includes('to reproduce')) { inRepro = true; continue; }
+             if (inRepro && (low.includes('expected behavior') || low.includes('screenshots') || low.includes('desktop') || low.includes('additional context'))) {
+               inRepro = false;
+             }
+             if (inRepro && /^\d+\./.test(line)) reproSteps.push(line.replace(/^\d+\.\s*/, '));
+           }
 
-          # Экранируем для JSON
-          ESCAPED_BODY=$(echo "$ISSUE_BODY" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
-          ESCAPED_NAME=$(echo "$NAME" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
-          ESCAPED_STEPS=$(echo "$STEPS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
-          ESCAPED_EXPECTED=$(echo "$EXPECTED" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+           const steps = reproSteps.length
+             ? reproSteps.map(s => ({ action: s, expected: 'Шаг выполнен без ошибок' }))
+             : [{ action: 'Открыть issue и выполнить проверку по описанию', expected: 'Баг воспроизводится' }];
 
-          echo "Creating test case: $ESCAPED_NAME"
+           const payload = {
+             entityTypeName: "TestCases",
+             name: issue.title,
+             projectId: process.env.TESTIT_PROJECT_ID,
+             sectionId: process.env.TESTIT_SECTION_ID,
+             state: "Ready",
+             priority: "Medium",
+             duration: 60,
+             precondition: "Issue создан в GitHub и помечен label bug.",
+             postcondition: "Проверка завершена.",
+             description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
+             steps
+           };
 
-          # Создаём тест-кейс в TestIT (свой инстанс!)
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://team-cyqh.testit.software/api/v2/testcases" \
-            -H "Authorization: Bearer $TESTIT_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"projectId\": $TESTIT_PROJECT_ID,
-              \"testSuiteId\": \"$TESTIT_TEST_SUITE_ID\",
-              \"name\": \"$ESCAPED_NAME\",
-              \"description\": \"$ESCAPED_BODY\",
-              \"steps\": \"$ESCAPED_STEPS\",
-              \"expectedResult\": \"$ESCAPED_EXPECTED\"
-            }")
+           const resp = await fetch(`${process.env.TESTIT_URL}/api/v2/workItems`, {
+             method: 'POST',
+             headers: {
+               'accept': 'application/json',
+               'content-type': 'application/json',
+               'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
+             },
+             body: JSON.stringify(payload)
+           });
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
+           const text = await resp.text();
+           core.info(`TestIT status: ${resp.status}`);
+           core.info(`TestIT response: ${text}`);
 
-          echo "HTTP Status: $HTTP_CODE"
-          echo "TestIT Response: $BODY"
+           if (!resp.ok) {
+             core.setFailed(`TestIT API error ${resp.status}: ${text}`);
+             return;
+           }
 
-          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
-            echo "API Error: HTTP $HTTP_CODE"
-           echo "$BODY"
-            exit 1
-          fi
+           let id = '';
+           try { id = JSON.parse(text).id || ''; } catch {}
+           const msg = id
+             ? `✅ Тест-кейс создан в TestIT: \`${id}\`
+             : `✅ Тест-кейс создан в TestIT.`;
 
-          # Извлекаем ID
-          TESTCASE_ID=$(echo "$BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-          if [ -z "$TESTCASE_ID" ]; then
-            echo "Failed to extract test case ID. Response: $BODY"
-            exit 1
-          fi
-
-          echo "Test case created with ID: $TESTCASE_ID"
-
-          # Привязываем GitHub Issue
-          curl -s -X POST "https://team-cyqh.testit.software/api/v2/links" \
-            -H "Authorization: Bearer $TESTIT_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"testCaseId\": \"$TESTCASE_ID\",
-              \"externalId\": \"$ISSUE_NUMBER\",
-              \"externalSystem\": \"github\"
-            }"
-
-          # Комментарий в issue
-          curl -s -X POST \
-            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"body\": \"✅ Тест-кейс создан в TestIT (ID: $TESTCASE_ID)\"}"
+           await github.rest.issues.createComment({
+             owner: context.repo.owner,
+             repo: context.repo,
+             issue_number: issue.number,
+             body: msg
+           });
