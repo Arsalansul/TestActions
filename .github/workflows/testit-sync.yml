@@ -16,24 +16,26 @@ jobs:
      - name: Create Test Case in TestIT
        uses: actions/github-script@v7
        env:
-         TESTIT_URL: ${{ secrets.TESTIT_URL }}              # например: https://team-cyqh.testit.software
-         TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}      # PrivateToken key (без префикса)
-         TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }} # GUID проекта
-         TESTIT_SECTION_ID: ${{ secrets.TESTIT_SECTION_ID }} # GUID секции (sectionId)
+         TESTIT_URL: ${{ secrets.TESTIT_URL }}
+         TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
+         TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }}
+         TESTIT_SECTION_ID: ${{ secrets.TESTIT_SECTION_ID }}
        with:
          github-token: ${{ secrets.GITHUB_TOKEN }}
          script: |
            const issue = context.payload.issue;
 
-           // Обрабатываем только issue с label "bug"
-           const labels = (issue.labels || []).map(l => (l.name || '').toLowerCase());
+           const labels = (issue.labels || []).map(function (l) {
+             return (l.name || '').toLowerCase();
+           });
+
            if (!labels.includes('bug')) {
-             core.info('Label "bug" не найден. Пропускаю.');
+             core.info('Label bug не найден, пропускаю.');
              return;
            }
 
            const body = issue.body || '';
-           const lines = body.split('\n').map(s => s.trim());
+           const lines = body.split('\n').map(function (s) { return s.trim(); });
 
            function extractSection(startMarker, stopMarkers) {
              let collecting = false;
@@ -48,7 +50,7 @@ jobs:
                  continue;
                }
 
-               if (collecting && stopMarkers.some(m => lower.includes(m.toLowerCase()))) {
+               if (collecting && stopMarkers.some(function (m) { return lower.includes(m.toLowerCase()); })) {
                  break;
                }
 
@@ -74,16 +76,18 @@ jobs:
            ]);
 
            const reproduceSteps = reproduceBlock
-             .filter(line => /^\d+\./.test(line))
-             .map(line => line.replace(/^\d+\.\s*/, '');
+             .filter(function (line) { return /^\d+\./.test(line); })
+             .map(function (line) { return line.replace(/^\d+\.\s*/, '); });
 
            const expectedText = expectedBlock.join(' ').trim();
 
-           const steps = (reproduceSteps.length > 0)
-             ? reproduceSteps.map(s => ({
-                 action: s,
-                 expected: expectedText || 'Шаг выполнен без ошибок'
-               }))
+           const steps = reproduceSteps.length > 0
+             ? reproduceSteps.map(function (s) {
+                 return {
+                   action: s,
+                   expected: expectedText || 'Шаг выполнен без ошибок'
+                 };
+               })
              : [{
                  action: 'Открыть issue и выполнить проверку по описанию',
                  expected: expectedText || 'Баг воспроизводится'
@@ -99,29 +103,29 @@ jobs:
              duration: 60,
              precondition: 'Issue создан в GitHub и помечен label bug.',
              postcondition: 'Проверка завершена.',
-             description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
-             steps
+             description: 'GitHub Issue #' + issue.number + '\n' + issue.html_url + '\n' + body,
+             steps: steps
            };
 
-           const url = `${process.env.TESTIT_URL}/api/v2/workItems`;
-           core.info(`POST ${url}`);
+           const url = process.env.TESTIT_URL + '/api/v2/workItems';
+           core.info('POST ' + url);
 
            const resp = await fetch(url, {
              method: 'POST',
              headers: {
-               'accept': 'application/json',
+               accept: 'application/json',
                'content-type': 'application/json',
-               'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
+               authorization: 'PrivateToken ' + process.env.TESTIT_API_KEY
              },
              body: JSON.stringify(payload)
            });
 
            const text = await resp.text();
-           core.info(`TestIT status: ${resp.status}`);
-           core.info(`TestIT response: ${text}`);
+           core.info('TestIT status: ' + resp.status);
+           core.info('TestIT response: ' + text);
 
            if (!resp.ok) {
-             core.setFailed(`TestIT API error ${resp.status}: ${text}`);
+             core.setFailed('TestIT API error ' + resp.status + ': ' + text);
              return;
            }
 
@@ -130,11 +134,11 @@ jobs:
              const json = JSON.parse(text);
              createdId = json.id || '';
            } catch (e) {
-             core.info('Не удалось распарсить JSON ответа, продолжаю без ID.');
+             core.info('Ответ не JSON или без id.');
            }
 
            const commentBody = createdId
-             ? `✅ Тест-кейс создан в TestIT: \`${createdId}\`
+             ? '✅ Тест-кейс создан в TestIT: ' + createdId
              : '✅ Тест-кейс создан в TestIT.';
 
            await github.rest.issues.createComment({
