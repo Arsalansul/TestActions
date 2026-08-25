@@ -94,7 +94,7 @@ jobs:
              duration: 60,
              precondition: 'Issue создан в GitHub и помечен label bug.',
              postcondition: 'Проверка завершена.',
-             description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
+             description: `GitHub Issue #${issue.number}\n${issue.html_url}`,
              steps: steps
            };
 
