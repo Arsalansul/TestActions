@@ -4,95 +4,142 @@ on:
  issues:
    types: [opened]
 
+permissions:
+ issues: write
+ contents: read
+
 jobs:
- create-testit-testcase:
+ sync-to-testit:
    runs-on: ubuntu-latest
+
    steps:
      - name: Create Test Case in TestIT
        uses: actions/github-script@v7
        env:
-         TESTIT_URL: ${{ secrets.TESTIT_URL }} # https://team-cyqh.testit.software
-         TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
-         TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }} # GUID, как в рабочем curl
-         TESTIT_SECTION_ID: ${{ secrets.TESTIT_SECTION_ID }} # sectionId
+         TESTIT_URL: ${{ secrets.TESTIT_URL }}              # например: https://team-cyqh.testit.software
+         TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}      # PrivateToken key (без префикса)
+         TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }} # GUID проекта
+         TESTIT_SECTION_ID: ${{ secrets.TESTIT_SECTION_ID }} # GUID секции (sectionId)
        with:
          github-token: ${{ secrets.GITHUB_TOKEN }}
          script: |
-          const issue = context.payload.issue;
-          const labels = (issue.labels || []).map(l => l.name.toLowerCase());
-          if (!labels.includes('bug')) {
-            core.info('Нет label bug — пропускаю.');
-            return;
-          }
-         
-          const body = issue.body || '';
-          const lines = body.split('\n').map(s => s.trim()).filter(Boolean);
-         
-          let inRepro = false;
-          const reproSteps = [];
-          for (const line of lines) {
-            const low = line.toLowerCase();
-            if (low.includes('to reproduce')) { inRepro = true; continue; }
-            if (inRepro && (
-              low.includes('expected behavior') ||
-              low.includes('screenshots') ||
-              low.includes('desktop') ||
-              low.includes('additional context')
-            )) {
-              inRepro = false;
-            }
-            if (inRepro && /^\d+\./.test(line)) {
-              reproSteps.push(line.replace(/^\d+\.\s*/, '));
-            }
-          }
-         
-          const steps = reproSteps.length
-            ? reproSteps.map(s => ({ action: s, expected: 'Шаг выполнен без ошибок' }))
-            : [{ action: 'Открыть issue и выполнить проверку по описанию', expected: 'Баг воспроизводится' }];
-         
-          const payload = {
-            entityTypeName: 'TestCases',
-            name: issue.title,
-            projectId: process.env.TESTIT_PROJECT_ID,
-            sectionId: process.env.TESTIT_SECTION_ID,
-            state: 'Ready',
-            priority: 'Medium',
-            duration: 60,
-            precondition: 'Issue создан в GitHub и помечен label bug.',
-            postcondition: 'Проверка завершена.',
-            description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
-            steps
-          };
-         
-          const resp = await fetch(`${process.env.TESTIT_URL}/api/v2/workItems`, {
-            method: 'POST',
-            headers: {
-              'accept': 'application/json',
-              'content-type': 'application/json',
-              'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
-            },
-            body: JSON.stringify(payload)
-          });
-         
-          const text = await resp.text();
-          core.info(`TestIT status: ${resp.status}`);
-          core.info(`TestIT response: ${text}`);
-         
-          if (!resp.ok) {
-            core.setFailed(`TestIT API error ${resp.status}: ${text}`);
-            return;
-          }
-         
-          let id = '';
-          try { id = JSON.parse(text).id || ''; } catch {}
-         
-          const msg = id
-            ? `✅ Тест-кейс создан в TestIT: \`${id}\`
-            : '✅ Тест-кейс создан в TestIT.';
-         
-          await github.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo,
-            issue_number: issue.number,
-            body: msg
-          });
+           const issue = context.payload.issue;
+
+           // Обрабатываем только issue с label "bug"
+           const labels = (issue.labels || []).map(l => (l.name || '').toLowerCase());
+           if (!labels.includes('bug')) {
+             core.info('Label "bug" не найден. Пропускаю.');
+             return;
+           }
+
+           const body = issue.body || '';
+           const lines = body.split('\n').map(s => s.trim());
+
+           function extractSection(startMarker, stopMarkers) {
+             let collecting = false;
+             const result = [];
+
+             for (const rawLine of lines) {
+               const line = rawLine.trim();
+               const lower = line.toLowerCase();
+
+               if (!collecting && lower.includes(startMarker.toLowerCase())) {
+                 collecting = true;
+                 continue;
+               }
+
+               if (collecting && stopMarkers.some(m => lower.includes(m.toLowerCase()))) {
+                 break;
+               }
+
+               if (collecting && line.length > 0) {
+                 result.push(line);
+               }
+             }
+
+             return result;
+           }
+
+           const reproduceBlock = extractSection('to reproduce', [
+             'expected behavior',
+             'screenshots',
+             'desktop',
+             'additional context'
+           ]);
+
+           const expectedBlock = extractSection('expected behavior', [
+             'screenshots',
+             'desktop',
+             'additional context'
+           ]);
+
+           const reproduceSteps = reproduceBlock
+             .filter(line => /^\d+\./.test(line))
+             .map(line => line.replace(/^\d+\.\s*/, '');
+
+           const expectedText = expectedBlock.join(' ').trim();
+
+           const steps = (reproduceSteps.length > 0)
+             ? reproduceSteps.map(s => ({
+                 action: s,
+                 expected: expectedText || 'Шаг выполнен без ошибок'
+               }))
+             : [{
+                 action: 'Открыть issue и выполнить проверку по описанию',
+                 expected: expectedText || 'Баг воспроизводится'
+               }];
+
+           const payload = {
+             entityTypeName: 'TestCases',
+             name: issue.title,
+             projectId: process.env.TESTIT_PROJECT_ID,
+             sectionId: process.env.TESTIT_SECTION_ID,
+             state: 'Ready',
+             priority: 'Medium',
+             duration: 60,
+             precondition: 'Issue создан в GitHub и помечен label bug.',
+             postcondition: 'Проверка завершена.',
+             description: `GitHub Issue #${issue.number}\n${issue.html_url}\n${body}`,
+             steps
+           };
+
+           const url = `${process.env.TESTIT_URL}/api/v2/workItems`;
+           core.info(`POST ${url}`);
+
+           const resp = await fetch(url, {
+             method: 'POST',
+             headers: {
+               'accept': 'application/json',
+               'content-type': 'application/json',
+               'authorization': `PrivateToken ${process.env.TESTIT_API_KEY}`
+             },
+             body: JSON.stringify(payload)
+           });
+
+           const text = await resp.text();
+           core.info(`TestIT status: ${resp.status}`);
+           core.info(`TestIT response: ${text}`);
+
+           if (!resp.ok) {
+             core.setFailed(`TestIT API error ${resp.status}: ${text}`);
+             return;
+           }
+
+           let createdId = '';
+           try {
+             const json = JSON.parse(text);
+             createdId = json.id || '';
+           } catch (e) {
+             core.info('Не удалось распарсить JSON ответа, продолжаю без ID.');
+           }
+
+           const commentBody = createdId
+             ? `✅ Тест-кейс создан в TestIT: \`${createdId}\`
+             : '✅ Тест-кейс создан в TestIT.';
+
+           await github.rest.issues.createComment({
+             owner: context.repo.owner,
+             repo: context.repo,
+             issue_number: issue.number,
+             body: commentBody
+           });
