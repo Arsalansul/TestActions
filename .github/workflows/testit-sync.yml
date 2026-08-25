@@ -1,0 +1,65 @@
+name: Sync GitHub Issues to TestIT
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  sync-to-testit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create test case in TestIT
+        if: github.event.action == 'opened'
+        env:
+          TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
+          TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }}
+          TESTIT_TEST_SUITE_ID: ${{ secrets.TESTIT_TEST_SUITE_ID }}
+        run: |
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY="${{ github.event.issue.body }}"
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+
+          # Парсим описание issue
+          NAME=$(echo "$ISSUE_BODY" | sed -n '/\*\*Describe the bug\*\*/,/\*\*To Reproduce\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d' | head -c 200)
+          STEPS=$(echo "$ISSUE_BODY" | sed -n '/\*\*To Reproduce\*\*/,/\*\*Expected behavior\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d')
+          EXPECTED=$(echo "$ISSUE_BODY" | sed -n '/\*\*Expected behavior\*\*/,/\*\*Screenshots\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d')
+
+          # Создаём тест-кейс в TestIT
+          RESPONSE=$(curl -s -X POST "https://app.testit.software/api/v2/testcases" \
+            -H "Authorization: Bearer $TESTIT_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"projectId\": $TESTIT_PROJECT_ID,
+              \"testSuiteId\": \"$TESTIT_TEST_SUITE_ID\",
+              \"name\": \"$NAME\",
+              \"description\": \"$(echo "$ISSUE_BODY" | sed 's/\"/\\\"/g')\",
+              \"steps\": \"$(echo "$STEPS" | sed 's/\"/\\\"/g')\",
+              \"expectedResult\": \"$(echo "$EXPECTED" | sed 's/\"/\\\"/g')\"
+           }")
+
+          TESTCASE_ID=$(echo "$RESPONSE" | jq -r '.id')
+
+          if [ -z "$TESTCASE_ID" ] || [ "$TESTCASE_ID" = "null" ]; then
+            echo "Failed to create test case. Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "Test case created with ID: $TESTCASE_ID"
+
+          # Привязываем GitHub Issue к тест-кейсу
+          curl -s -X POST "https://app.testit.software/api/v2/links" \
+            -H "Authorization: Bearer $TESTIT_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"testCaseId\": \"$TESTCASE_ID\",
+              \"externalId\": \"$ISSUE_NUMBER\",
+              \"externalSystem\": \"github\"
+            }"
+
+          # Комментарий в issue
+          curl -s -X POST \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\": \"✅ Тест-кейс создан в TestIT (ID: $TESTCASE_ID)\"}"
