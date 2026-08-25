@@ -9,7 +9,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create test case in TestIT
-        if: github.event.action == 'opened'
         env:
           TESTIT_API_KEY: ${{ secrets.TESTIT_API_KEY }}
           TESTIT_PROJECT_ID: ${{ secrets.TESTIT_PROJECT_ID }}
@@ -18,37 +17,63 @@ jobs:
           ISSUE_TITLE="${{ github.event.issue.title }}"
           ISSUE_BODY="${{ github.event.issue.body }}"
           ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ISSUE_URL="${{ github.event.issue.html_url }}"
 
-          # Парсим описание issue
-          NAME=$(echo "$ISSUE_BODY" | sed -n '/\*\*Describe the bug\*\*/,/\*\*To Reproduce\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d' | head -c 200)
-          STEPS=$(echo "$ISSUE_BODY" | sed -n '/\*\*To Reproduce\*\*/,/\*\*Expected behavior\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d')
-          EXPECTED=$(echo "$ISSUE_BODY" | sed -n '/\*\*Expected behavior\*\*/,/\*\*Screenshots\*\*/p' | head -n -1 | tail -n +2 | sed '/^$/d')
+          # Парсим через grep/sed
+          NAME=$(echo "$ISSUE_BODY" | awk '/\*\*Describe the bug\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}' | head -c 200)
+          STEPS=$(echo "$ISSUE_BODY" | awk '/\*\*To Reproduce\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}')
+          EXPECTED=$(echo "$ISSUE_BODY" | awk '/\*\*Expected behavior\*\*/{found=1; next} /\*\*/{found=0} found && NF{print}')
 
-          # Создаём тест-кейс в TestIT
-          RESPONSE=$(curl -s -X POST "https://app.testit.software/api/v2/testcases" \
+          if [ -z "$NAME" ]; then
+            NAME="$ISSUE_TITLE"
+            STEPS=""
+            EXPECTED=""
+          fi
+
+          # Экранируем для JSON
+          ESCAPED_BODY=$(echo "$ISSUE_BODY" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+          ESCAPED_NAME=$(echo "$NAME" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+          ESCAPED_STEPS=$(echo "$STEPS" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+          ESCAPED_EXPECTED=$(echo "$EXPECTED" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+
+          echo "Creating test case: $ESCAPED_NAME"
+
+          # Создаём тест-кейс в TestIT (свой инстанс!)
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://team-cyqh.testit.software/api/v2/testcases" \
             -H "Authorization: Bearer $TESTIT_API_KEY" \
             -H "Content-Type: application/json" \
             -d "{
               \"projectId\": $TESTIT_PROJECT_ID,
               \"testSuiteId\": \"$TESTIT_TEST_SUITE_ID\",
-              \"name\": \"$NAME\",
-              \"description\": \"$(echo "$ISSUE_BODY" | sed 's/\"/\\\"/g')\",
-              \"steps\": \"$(echo "$STEPS" | sed 's/\"/\\\"/g')\",
-              \"expectedResult\": \"$(echo "$EXPECTED" | sed 's/\"/\\\"/g')\"
-           }")
+              \"name\": \"$ESCAPED_NAME\",
+              \"description\": \"$ESCAPED_BODY\",
+              \"steps\": \"$ESCAPED_STEPS\",
+              \"expectedResult\": \"$ESCAPED_EXPECTED\"
+            }")
 
-          TESTCASE_ID=$(echo "$RESPONSE" | jq -r '.id')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
 
-          if [ -z "$TESTCASE_ID" ] || [ "$TESTCASE_ID" = "null" ]; then
-            echo "Failed to create test case. Response: $RESPONSE"
+          echo "HTTP Status: $HTTP_CODE"
+          echo "TestIT Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "API Error: HTTP $HTTP_CODE"
+           echo "$BODY"
+            exit 1
+          fi
+
+          # Извлекаем ID
+          TESTCASE_ID=$(echo "$BODY" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+          if [ -z "$TESTCASE_ID" ]; then
+            echo "Failed to extract test case ID. Response: $BODY"
             exit 1
           fi
 
           echo "Test case created with ID: $TESTCASE_ID"
 
-          # Привязываем GitHub Issue к тест-кейсу
-          curl -s -X POST "https://app.testit.software/api/v2/links" \
+          # Привязываем GitHub Issue
+          curl -s -X POST "https://team-cyqh.testit.software/api/v2/links" \
             -H "Authorization: Bearer $TESTIT_API_KEY" \
             -H "Content-Type: application/json" \
             -d "{
