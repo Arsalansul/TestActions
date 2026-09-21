@@ -17,49 +17,71 @@ concurrency:
   group: unit-tests-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  UNITY_PATH: C:\Program Files\Unity\Hub\Editor\6000.3.6f1\Editor\Unity.exe
+
 jobs:
   test:
-    name: Tests (${{ matrix.testMode }})
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.key }})
+    runs-on: [self-hosted, windows, unity]
+    timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Один редактор Unity на машину за раз: оба режима делят workspace и Library.
+      max-parallel: 1
       matrix:
-        testMode:
-          - editmode
-          - playmode
+        include:
+          - key: editmode
+            platform: EditMode
+          - key: playmode
+            platform: PlayMode
     steps:
+      # clean: false обязателен — git clean -ffdx снёс бы Library (она в .gitignore),
+      # а тёплая Library и есть причина, по которой прогон на своей машине быстрый.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           lfs: true
+          clean: false
 
-      - uses: actions/cache@v4
-        with:
-          path: My project/Library
-          key: Library-test-${{ matrix.testMode }}-${{ hashFiles('My project/Assets/**', 'My project/Packages/**', 'My project/ProjectSettings/**') }}
-          restore-keys: |
-            Library-test-${{ matrix.testMode }}-
-            Library-test-
-            Library-
+      - name: Run ${{ matrix.platform }} tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $artifacts = Join-Path $env:GITHUB_WORKSPACE 'artifacts\${{ matrix.key }}'
+          New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
+          $results = Join-Path $artifacts 'results.xml'
+          $log = Join-Path $artifacts 'unity.log'
+          $project = Join-Path $env:GITHUB_WORKSPACE 'My project'
 
-      - uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          projectPath: My project
-          testMode: ${{ matrix.testMode }}
-          artifactsPath: artifacts/${{ matrix.testMode }}
-          checkName: ${{ matrix.testMode }} test results
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          if (-not (Test-Path $env:UNITY_PATH)) {
+            Write-Host "::error::Unity не найден: $env:UNITY_PATH"
+            exit 1
+          }
+
+          & $env:UNITY_PATH `
+            -batchmode `
+            -runTests `
+            -projectPath $project `
+            -testPlatform ${{ matrix.platform }} `
+            -testResults $results `
+            -logFile $log
+          $code = $LASTEXITCODE
+
+          if (Test-Path $log) {
+            Write-Host "--- последние 200 строк Unity.log ---"
+            Get-Content $log -Tail 200
+          }
+
+          # 0 — все тесты прошли, 2 — есть упавшие (отчёт всё равно нужен), остальное — сбой прогона.
+          Write-Host "Unity exit code: $code"
+          exit $code
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-${{ matrix.testMode }}
-          path: artifacts/${{ matrix.testMode }}
+          name: test-results-${{ matrix.key }}
+          path: artifacts/${{ matrix.key }}
           if-no-files-found: warn
 
   report:
