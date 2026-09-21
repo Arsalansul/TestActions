@@ -1,0 +1,247 @@
+name: Unit tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - stage
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: unit-tests-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (${{ matrix.testMode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        testMode:
+          - editmode
+          - playmode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-test-${{ matrix.testMode }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: |
+            Library-test-${{ matrix.testMode }}-
+            Library-test-
+            Library-
+
+      - uses: game-ci/unity-test-runner@v4
+        id: tests
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          testMode: ${{ matrix.testMode }}
+          artifactsPath: artifacts/${{ matrix.testMode }}
+          checkName: ${{ matrix.testMode }} test results
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.testMode }}
+          path: artifacts/${{ matrix.testMode }}
+          if-no-files-found: warn
+
+  report:
+    name: Report to PR
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: test-results-*
+          path: artifacts
+
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const MARKER = '<!-- unity-unit-tests-report -->';
+            const jobsResult = '${{ needs.test.result }}';
+            const root = 'artifacts';
+
+            function findXml(dir) {
+              const out = [];
+              if (!fs.existsSync(dir)) return out;
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) out.push(...findXml(full));
+                else if (entry.name.toLowerCase().endsWith('.xml')) out.push(full);
+              }
+              return out;
+            }
+
+            function attrs(tag) {
+              const map = {};
+              const re = /([\w-]+)="([^"]*)"/g;
+              let m;
+              while ((m = re.exec(tag)) !== null) map[m[1]] = m[2];
+              return map;
+            }
+
+            function unescapeXml(s) {
+              return String(s)
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&quot;/g, '"')
+                .replace(/&apos;/g, "'")
+                .replace(/&amp;/g, '&');
+            }
+
+            function text(block, tagName) {
+              const m = new RegExp('<' + tagName + '>([\\s\\S]*?)</' + tagName + '>').exec(block);
+              if (!m) return '';
+              const raw = m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+              return unescapeXml(raw).trim();
+            }
+
+            // Сводка прогона + все упавшие кейсы из одного NUnit3-файла результатов.
+            function parseResults(xml) {
+              const runTag = /<test-run\b[^>]*>/.exec(xml);
+              const a = runTag ? attrs(runTag[0]) : {};
+              const summary = {
+                result: a.result || 'Unknown',
+                total: Number(a.total || 0),
+                passed: Number(a.passed || 0),
+                failed: Number(a.failed || 0),
+                skipped: Number(a.skipped || 0) + Number(a.inconclusive || 0),
+                duration: Number(a.duration || 0),
+              };
+
+              const failures = [];
+              const caseRe = /<test-case\b([^>]*?)(\/?)>/g;
+              let m;
+              while ((m = caseRe.exec(xml)) !== null) {
+                const ca = attrs(m[1]);
+                if (ca.result !== 'Failed' || m[2] === '/') continue;
+                const end = xml.indexOf('</test-case>', caseRe.lastIndex);
+                const body = end === -1 ? '' : xml.slice(caseRe.lastIndex, end);
+                failures.push({
+                  name: ca.fullname || ca.name || '(unnamed)',
+                  message: text(body, 'message'),
+                  stack: text(body, 'stack-trace'),
+                });
+              }
+              return { summary, failures };
+            }
+
+            const modes = ['editmode', 'playmode'];
+            const rows = [];
+            const failureSections = [];
+            const totals = { total: 0, passed: 0, failed: 0, skipped: 0 };
+            let anyResults = false;
+
+            for (const mode of modes) {
+              const files = findXml(path.join(root, 'test-results-' + mode));
+              if (files.length === 0) {
+                rows.push('| ' + mode + ' | ⚠️ Нет результатов | – | – | – | – | – |');
+                continue;
+              }
+              anyResults = true;
+              for (const file of files) {
+                const parsed = parseResults(fs.readFileSync(file, 'utf8'));
+                const s = parsed.summary;
+                totals.total += s.total;
+                totals.passed += s.passed;
+                totals.failed += s.failed;
+                totals.skipped += s.skipped;
+
+                const icon = s.failed > 0
+                  ? '❌ Failed'
+                  : (s.result === 'Passed' ? '✅ Passed' : '⚠️ ' + s.result);
+                rows.push('| ' + mode + ' | ' + icon + ' | ' + s.total + ' | ' + s.passed + ' | ' + s.failed + ' | ' + s.skipped + ' | ' + s.duration.toFixed(1) + 's |');
+
+                for (const f of parsed.failures) {
+                  const details = [f.message, f.stack].filter(Boolean).join('\n\n').slice(0, 3000);
+                  failureSections.push(
+                    '<details><summary>❌ <code>' + f.name + '</code> (' + mode + ')</summary>\n\n```\n' + details + '\n```\n\n</details>'
+                  );
+                }
+              }
+            }
+
+            const overall = totals.failed > 0
+              ? '❌ Тесты упали'
+              : (!anyResults || jobsResult !== 'success' ? '⚠️ Прогон завершился с ошибкой' : '✅ Все тесты прошли');
+
+            let body = [
+              MARKER,
+              '## 🧪 Unit tests — ' + overall,
+              '',
+              '| Mode | Result | Total | ✅ Passed | ❌ Failed | ⏭️ Skipped | ⏱️ Duration |',
+              '| --- | --- | ---: | ---: | ---: | ---: | ---: |',
+            ].concat(rows).concat([
+              '',
+              '**Итого:** ' + totals.passed + '/' + totals.total + ' прошло, ' + totals.failed + ' упало, ' + totals.skipped + ' пропущено.',
+              '',
+            ]).join('\n');
+
+            if (failureSections.length > 0) {
+              body += ['### Упавшие тесты', ''].concat(failureSections).concat(['']).join('\n');
+            }
+
+            if (!anyResults) {
+              body += '\nФайлы результатов не найдены — скорее всего прогон упал до запуска тестов. Подробности в логах джобы.\n';
+            }
+
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const runUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId;
+            body += '\n---\nКоммит `' + sha + '` · [Лог прогона](' + runUrl + ')';
+
+            if (body.length > 65000) {
+              body = body.slice(0, 64800) + '\n\n_…отчёт обрезан, подробности в логах прогона._';
+            }
+
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body,
+              });
+            }
+
+            await core.summary.addRaw(body.replace(MARKER, '')).write();
+
+            if (totals.failed > 0 || jobsResult !== 'success') {
+              core.setFailed('Unit tests failed — см. комментарий в PR.');
+            }
