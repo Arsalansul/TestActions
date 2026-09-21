@@ -59,18 +59,30 @@ jobs:
             exit 1
           }
 
-          & $env:UNITY_PATH `
-            -batchmode `
-            -runTests `
-            -projectPath $project `
-            -testPlatform ${{ matrix.platform }} `
-            -testResults $results `
-            -logFile $log
-          $code = $LASTEXITCODE
+          # Unity.exe — GUI-приложение, оператор & его НЕ ждёт: вернул бы 0 сразу после
+          # запуска, шаг бы закрылся, а раннер убил бы Unity на середине импорта проекта.
+          # Дождаться завершения можно только через Start-Process -Wait.
+          $unityArgs = @(
+            '-batchmode',
+            '-runTests',
+            '-projectPath', "`"$project`"",
+            '-testPlatform', '${{ matrix.platform }}',
+            '-testResults', "`"$results`"",
+            '-logFile', "`"$log`""
+          )
+          $proc = Start-Process -FilePath $env:UNITY_PATH -ArgumentList $unityArgs -NoNewWindow -Wait -PassThru
+          $code = $proc.ExitCode
 
           if (Test-Path $log) {
             Write-Host "--- последние 200 строк Unity.log ---"
             Get-Content $log -Tail 200
+          }
+
+          # Страховка от «тихого зелёного»: код 0 без файла результатов означает,
+          # что Unity не дошёл до тестов, а не что они прошли.
+          if (-not (Test-Path $results)) {
+            Write-Host "::error::Unity не создал файл результатов: $results"
+            if ($code -eq 0) { $code = 1 }
           }
 
           # 0 — все тесты прошли, 2 — есть упавшие (отчёт всё равно нужен), остальное — сбой прогона.
