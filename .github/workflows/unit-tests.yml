@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: Library
+          path: My project/Library
           key: Library-test-${{ matrix.testMode }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
           restore-keys: |
             Library-test-${{ matrix.testMode }}-
